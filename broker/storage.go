@@ -1,4 +1,3 @@
-// broker/storage.go
 package broker
 
 import (

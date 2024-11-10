@@ -15,10 +15,10 @@ type Broker struct {
 	ID           string
 	Address      string
 	storage      *storage.Storage
-	topics       map[string][]net.Conn // Topic to subscriber connections
-	partitions   map[string][]int      // Topic to partition IDs
-	partitionMap map[int][]net.Conn    // Partition ID to subscriber connections
-	peers        map[string]string     // BrokerID to Address
+	topics       map[string][]net.Conn
+	partitions   map[string][]int
+	partitionMap map[int][]*Subscriber
+	peers        map[string]string
 	isLeader     bool
 	cluster      *Cluster
 	mu           sync.RWMutex
@@ -36,12 +36,12 @@ func NewBroker(id, address, dbPath string, isLeader bool) (*Broker, error) {
 		storage:      store,
 		topics:       make(map[string][]net.Conn),
 		partitions:   make(map[string][]int),
-		partitionMap: make(map[int][]net.Conn),
+		partitionMap: make(map[int][]*Subscriber),
 		peers:        make(map[string]string),
 		isLeader:     isLeader,
 	}
 
-	broker.cluster = NewCluster(broker) // Initialize the cluster
+	broker.cluster = NewCluster(broker)
 	return broker, nil
 }
 
@@ -53,7 +53,7 @@ func (b *Broker) Start() error {
 	defer ln.Close()
 	log.Printf("Broker %s is running on %s...\n", b.ID, b.Address)
 
-	go b.cluster.StartCluster() // Run cluster initialization in a separate goroutine
+	go b.cluster.StartCluster()
 
 	for {
 		conn, err := ln.Accept()
@@ -103,10 +103,10 @@ func (b *Broker) handlePublish(msg protocol.Message, encoder *gob.Encoder) {
 	b.mu.RUnlock()
 	if exists {
 		for _, sub := range subscribers {
-			subEncoder := gob.NewEncoder(sub)
-			err := subEncoder.Encode(msg)
+			err := sub.Encoder.Encode(msg)
 			if err != nil {
 				log.Println("Error sending message to subscriber:", err)
+				b.removeSubscriber(msg.Partition, sub)
 			}
 		}
 	} else {
@@ -121,10 +121,27 @@ func (b *Broker) handlePublish(msg protocol.Message, encoder *gob.Encoder) {
 }
 
 func (b *Broker) handleSubscribe(msg protocol.Message, conn net.Conn) {
+	subscriber := &Subscriber{
+		Conn:    conn,
+		Encoder: gob.NewEncoder(conn),
+	}
 	b.mu.Lock()
-	b.partitionMap[msg.Partition] = append(b.partitionMap[msg.Partition], conn)
+	b.partitionMap[msg.Partition] = append(b.partitionMap[msg.Partition], subscriber)
 	b.mu.Unlock()
 	log.Printf("New subscriber for topic: %s, partition: %d\n", msg.Topic, msg.Partition)
+}
+
+func (b *Broker) removeSubscriber(partition int, sub *Subscriber) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	subscribers := b.partitionMap[partition]
+	for i, s := range subscribers {
+		if s == sub {
+			s.Conn.Close()
+			b.partitionMap[partition] = append(subscribers[:i], subscribers[i+1:]...)
+			break
+		}
+	}
 }
 
 func (b *Broker) Close() {
