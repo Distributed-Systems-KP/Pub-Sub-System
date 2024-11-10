@@ -1,4 +1,3 @@
-// client/consumer/consumer.go
 package main
 
 import (
